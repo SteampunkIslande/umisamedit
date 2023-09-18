@@ -1,0 +1,11 @@
+[package]
+name = "umisamedit"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+argparse-rs = "0.1.0"
+bam = "0.1.4"
+
