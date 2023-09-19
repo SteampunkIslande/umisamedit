@@ -7,5 +7,8 @@ edition = "2021"
 
 [dependencies]
 argparse-rs = "0.1.0"
-bam = "0.1.4"
+csv = "1.2.2"
+linear-map = "1.2.0"
+rust-htslib = "*"
+serde = { version = "*", features = ["derive"] }
 

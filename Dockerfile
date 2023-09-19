@@ -1,6 +1,7 @@
-FROM ubuntu
+FROM debian:buster-slim
 
-COPY ./target/release/samedit /samedit
-RUN chmod +x /samedit
+WORKDIR /bin
 
-ENTRYPOINT [ "/samedit" ]
+COPY ./target/release/umisamedit .
+
+CMD ["/bin/umisamedit"]
