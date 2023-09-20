@@ -13,6 +13,8 @@ use argparse_rs;
 use argparse_rs::{ ArgParser, ArgType };
 use csv;
 
+use std::str;
+
 use serde::{ Deserialize, Serialize };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -42,27 +44,46 @@ fn read_csv_to_hashmap(filename: &str) -> Result<HashMap<String, String>, Box<dy
     Ok(hashmap)
 }
 
-fn rename_contig(
+fn header_rename_contig(
     header: &mut bam::Header,
+    new_tid_map: &mut HashMap<i32, i32>,
     original_header_map: &HashMap<String, Vec<LinearMap<String, String>>>,
     translation_map: HashMap<String, String>
 ) {
+    assert!(new_tid_map.is_empty(), "New TID map should start empty!");
     for (key, val) in original_header_map {
+        //Keep track of the mapping of kept contigs vs skipped contigs, important when writing records
+        let mut contig_counter = 0;
+        let mut kept_contigs_counter = 0;
+
         for names in val {
             let mut new_record = HeaderRecord::new(key.as_bytes());
             //If tag_value doesn't have a translation, don't add the tag
             let mut ignore_tag = false;
+
             for name in names {
                 let (tag_name, mut tag_value) = name;
 
                 if key == "SQ" && tag_name == "SN" {
                     tag_value = match translation_map.get(tag_value) {
-                        Some(translation) => { translation }
+                        Some(translation) => {
+                            match new_tid_map.insert(contig_counter, kept_contigs_counter) {
+                                Some(_) => {
+                                    panic!(
+                                        "Logical error: how did we end up returning back to a previous value of an incremental?"
+                                    );
+                                }
+                                None => {}
+                            }
+                            kept_contigs_counter += 1;
+                            translation
+                        }
                         None => {
                             ignore_tag = true;
                             tag_value
                         }
                     };
+                    contig_counter += 1;
                 }
                 if !ignore_tag {
                     new_record.push_tag(tag_name.as_bytes(), tag_value);
@@ -73,6 +94,23 @@ fn rename_contig(
             }
         }
     }
+
+    // UNCOMMENT TO DEBUG
+    // println!("{:?}", new_tid_map);
+    // let hv: HeaderView = HeaderView::from_header(header);
+    // for (k, v) in new_tid_map {
+    //     println!(
+    //         "Before: {}->{}\tAfter:{}->{:#?}",
+    //         k,
+    //         original_header_map["SQ"]
+    //             .iter()
+    //             .nth(*k as usize)
+    //             .unwrap()["SN"],
+    //         v,
+    //         String::from_utf8(hv.tid2name(*v as u32).to_vec()).unwrap()
+    //     );
+    // }
+    // panic!();
 
     // Below, code to make sure the header was edited correctly
     // for (key, val) in &header.to_hashmap() {
@@ -132,9 +170,15 @@ fn main() {
     let translation_map = read_csv_to_hashmap(&translation_filename).expect(
         "Translation file should exist and have exactly two columns"
     );
+    let mut new_tid_map = HashMap::<i32, i32>::new();
 
     //Creates a new header, renaming the contigs using translation_map
-    rename_contig(&mut new_header, &original_header.to_hashmap(), translation_map);
+    header_rename_contig(
+        &mut new_header,
+        &mut new_tid_map,
+        &original_header.to_hashmap(),
+        translation_map
+    );
 
     let mut writer = bam::Writer
         ::from_path(output_filename, &new_header, bam::Format::Bam)
@@ -142,6 +186,10 @@ fn main() {
 
     let mut record = Record::new();
     let rc_new_headerview = Rc::new(HeaderView::from_header(&new_header));
+
+    // Just two variables to get information about skipped contigs
+    let mut skipped_contig_names: HashMap<String, u32> = HashMap::new();
+    let mut skipped_records: u32 = 0;
 
     while let Some(_) = reader.read(&mut record) {
         match record.aux(tag_name.as_bytes()) {
@@ -153,20 +201,60 @@ fn main() {
             Err(..) => {}
         }
 
-        if record.tid() < rc_new_headerview.target_count().try_into().unwrap() {
-            record.set_header(rc_new_headerview.clone());
-            if record.tid() >= rc_new_headerview.target_count().try_into().unwrap() {
-                println!("Sérieux?");
-            }
-            match writer.write(&record) {
-                Ok(()) => {}
-                Err(e) => {
-                    println!("{}", e);
+        //Try to get the mapped contig ID
+        match (new_tid_map.get(&record.tid()), new_tid_map.get(&record.mtid())) {
+            //This contig ID was kept during translation
+            (Some(new_tid), Some(new_mtid)) => {
+                record.set_header(rc_new_headerview.clone());
+                record.set_tid(*new_tid);
+                record.set_mtid(*new_mtid);
+                match writer.write(&record) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("{}", e);
+                    }
                 }
             }
-        } else {
-            println!("We have an imposter {:?}", record);
-            break;
+            (Some(new_tid), None) => {
+                record.set_header(rc_new_headerview.clone());
+                record.set_tid(*new_tid);
+                record.set_mtid(-1);
+                match writer.write(&record) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("{}", e);
+                    }
+                }
+            }
+            (None, Some(new_mtid)) => {
+                record.set_header(rc_new_headerview.clone());
+                record.set_tid(-1);
+                record.set_mtid(*new_mtid);
+                match writer.write(&record) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("{}", e);
+                    }
+                }
+            }
+            //This contig ID was not kept in translation
+            (None, None) => {
+                let skipped_contig_name = String::from_utf8(
+                    reader.header().tid2name(record.tid().try_into().unwrap()).to_vec()
+                ).unwrap();
+                let skipped_contig_count = skipped_contig_names.get(&skipped_contig_name);
+                match skipped_contig_count {
+                    Some(val) => {
+                        skipped_contig_names.insert(skipped_contig_name, val + 1);
+                    }
+                    None => {
+                        skipped_contig_names.insert(skipped_contig_name, 1);
+                    }
+                }
+                skipped_records += 1;
+            }
         }
     }
+    eprintln!("Done properly renaming contigs, skipped {} records.", skipped_records);
+    eprintln!("Skipped contigs {:?}", skipped_contig_names);
 }
