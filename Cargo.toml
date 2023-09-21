@@ -9,6 +9,6 @@ edition = "2021"
 argparse-rs = "0.1.0"
 csv = "1.2.2"
 linear-map = "1.2.0"
-rust-htslib = "*"
+rust-htslib = { version = "*", features = ["bzip2", "lzma"] }
 serde = { version = "*", features = ["derive"] }
 
